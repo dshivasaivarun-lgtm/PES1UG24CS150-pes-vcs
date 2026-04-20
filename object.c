@@ -142,9 +142,34 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     mkdir(".pes", 0755);
     mkdir(OBJECTS_DIR, 0755);
     mkdir(dir, 0755);
-    
-    return -1;
+
+    // Temp file
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(buf);
+        return -1;
+    }
+
+    write(fd, buf, total);
+    fsync(fd);
+    close(fd);
+
+    rename(tmp, path);
+
+    // fsync directory
+    int dfd = open(dir, O_RDONLY);
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
+
+    free(buf);
+    return 0;
 }
+    
 
 // Read an object from the store.
 //
