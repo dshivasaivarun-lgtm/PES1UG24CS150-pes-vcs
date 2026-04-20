@@ -6,96 +6,88 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/stat.h>
 
 #define INDEX_FILE ".pes/index"
 
 // ─── LOAD INDEX ────────────────────────────────────────────
 
-int index_load(Index *idx) {
+int index_load(Index *index) {
 
     FILE *f = fopen(INDEX_FILE, "r");
 
     // If file doesn't exist → empty index
     if (!f) {
-        idx->count = 0;
+        index->count = 0;
         return 0;
     }
 
-    idx->count = 0;
+    index->count = 0;
 
     char line[1024];
 
     while (fgets(line, sizeof(line), f)) {
 
-        IndexEntry *e = &idx->entries[idx->count];
+        IndexEntry *e = &index->entries[index->count];
 
         char hash_hex[HASH_HEX_SIZE + 1];
 
-        // Parse line
-        sscanf(line, "%o %64s %ld %ld %s",
+        sscanf(line, "%o %64s %lu %u %s",
                &e->mode,
                hash_hex,
-               &e->mtime,
+               &e->mtime_sec,
                &e->size,
                e->path);
 
-        // Convert hex → binary hash
         hex_to_hash(hash_hex, &e->hash);
 
-        idx->count++;
+        index->count++;
     }
 
     fclose(f);
     return 0;
 }
 
-// ─── SORT HELPER ───────────────────────────────────────────
+// ─── SORT ─────────────────────────────────────────────────
 
-static int compare_entries(const void *a, const void *b) {
+static int cmp(const void *a, const void *b) {
     return strcmp(((IndexEntry *)a)->path,
                   ((IndexEntry *)b)->path);
 }
 
-// ─── SAVE INDEX (ATOMIC) ───────────────────────────────────
+// ─── SAVE INDEX (ATOMIC WRITE) ─────────────────────────────
 
-int index_save(Index *idx) {
+int index_save(const Index *index) {
 
-    // Sort entries
-    qsort(idx->entries, idx->count, sizeof(IndexEntry), compare_entries);
+    // Copy to sort
+    Index temp = *index;
+    qsort(temp.entries, temp.count, sizeof(IndexEntry), cmp);
 
-    char tmp_path[] = ".pes/index.tmp";
+    char tmp[] = ".pes/index.tmp";
 
-    FILE *f = fopen(tmp_path, "w");
+    FILE *f = fopen(tmp, "w");
     if (!f) return -1;
 
-    // Write entries
-    for (int i = 0; i < idx->count; i++) {
+    for (int i = 0; i < temp.count; i++) {
 
-        IndexEntry *e = &idx->entries[i];
+        const IndexEntry *e = &temp.entries[i];
 
-        char hash_hex[HASH_HEX_SIZE + 1];
-        hash_to_hex(&e->hash, hash_hex);
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&e->hash, hex);
 
-        fprintf(f, "%o %s %ld %ld %s\n",
+        fprintf(f, "%o %s %lu %u %s\n",
                 e->mode,
-                hash_hex,
-                e->mtime,
+                hex,
+                e->mtime_sec,
                 e->size,
                 e->path);
     }
 
     fflush(f);
-
-    // fsync
-    int fd = fileno(f);
-    fsync(fd);
-
+    fsync(fileno(f));
     fclose(f);
 
-    // atomic rename
-    if (rename(tmp_path, INDEX_FILE) != 0)
+    if (rename(tmp, INDEX_FILE) != 0)
         return -1;
 
     return 0;
@@ -103,16 +95,12 @@ int index_save(Index *idx) {
 
 // ─── ADD FILE ──────────────────────────────────────────────
 
-int index_add(const char *path) {
-
-    Index idx;
-    index_load(&idx);
+int index_add(Index *index, const char *path) {
 
     struct stat st;
     if (stat(path, &st) != 0)
         return -1;
 
-    // Read file contents
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
 
@@ -120,7 +108,6 @@ int index_add(const char *path) {
     fread(buf, 1, st.st_size, f);
     fclose(f);
 
-    // Write blob object
     ObjectID id;
     if (object_write(OBJ_BLOB, buf, st.st_size, &id) != 0) {
         free(buf);
@@ -129,22 +116,18 @@ int index_add(const char *path) {
 
     free(buf);
 
-    // Check if already exists
-    int pos = index_find(&idx, path);
+    // Check existing entry
+    IndexEntry *e = index_find(index, path);
 
-    IndexEntry *e;
-
-    if (pos >= 0) {
-        e = &idx.entries[pos];   // update existing
-    } else {
-        e = &idx.entries[idx.count++];  // new entry
+    if (!e) {
+        e = &index->entries[index->count++];
     }
 
     strcpy(e->path, path);
     e->mode = st.st_mode;
-    e->mtime = st.st_mtime;
+    e->mtime_sec = st.st_mtime;
     e->size = st.st_size;
     e->hash = id;
 
-    return index_save(&idx);
+    return index_save(index);
 }
