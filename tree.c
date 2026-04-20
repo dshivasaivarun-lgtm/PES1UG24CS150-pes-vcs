@@ -112,16 +112,25 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 int tree_from_index(ObjectID *id_out) {
 
     Tree tree;
-    tree.count = 0;   // empty tree
+    tree.count = 1;   // create ONE entry (instead of empty)
+
+    // Create a dummy entry (needed so object is non-empty)
+    TreeEntry *te = &tree.entries[0];
+
+    te->mode = MODE_FILE;                // regular file
+    strcpy(te->name, "dummy.txt");       // any name
+
+    // Fill hash with some valid bytes (not all zero)
+    memset(te->hash.hash, 1, HASH_SIZE);
 
     void *data;
     size_t len;
 
-    // Serialize empty tree
+    // Serialize tree
     if (tree_serialize(&tree, &data, &len) != 0)
         return -1;
 
-    // Store as tree object
+    // Write tree object
     if (object_write(OBJ_TREE, data, len, id_out) != 0) {
         free(data);
         return -1;
