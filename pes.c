@@ -35,25 +35,28 @@ void cmd_init(void) {
 }
 
 // Usage: pes add <file>...
-void cmd_add(int argc, char *argv[]) {
+int cmd_add(int argc, char *argv[]) {
+
     if (argc < 3) {
-        fprintf(stderr, "Usage: pes add <file>...\n");
-        return;
+        printf("Usage: pes add <files>\n");
+        return -1;
     }
 
     Index index;
+
     if (index_load(&index) != 0) {
-        fprintf(stderr, "error: failed to load index\n");
-        return;
+        printf("Error loading index\n");
+        return -1;
     }
 
     for (int i = 2; i < argc; i++) {
         if (index_add(&index, argv[i]) != 0) {
-            fprintf(stderr, "error: failed to add '%s'\n", argv[i]);
+            printf("Failed to add %s\n", argv[i]);
         }
     }
-}
 
+    return 0;
+}
 // Usage: pes status
 void cmd_status(void) {
     Index index;
