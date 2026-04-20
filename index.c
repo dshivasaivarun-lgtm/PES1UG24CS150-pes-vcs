@@ -27,18 +27,25 @@ int index_load(Index *index) {
 
     while (fgets(line, sizeof(line), f)) {
 
+        if (index->count >= MAX_INDEX_ENTRIES)
+            break;
+
         IndexEntry *e = &index->entries[index->count];
 
         char hash_hex[HASH_HEX_SIZE + 1];
 
-        sscanf(line, "%o %64s %lu %u %s",
-               &e->mode,
-               hash_hex,
-               &e->mtime_sec,
-               &e->size,
-               e->path);
+        // Safe parse (must read 5 fields)
+        if (sscanf(line, "%o %64s %lu %u %511s",
+                   &e->mode,
+                   hash_hex,
+                   &e->mtime_sec,
+                   &e->size,
+                   e->path) != 5) {
+            continue; // skip bad lines
+        }
 
-        hex_to_hash(hash_hex, &e->hash);
+        if (hex_to_hash(hash_hex, &e->hash) != 0)
+            continue;
 
         index->count++;
     }
@@ -50,11 +57,11 @@ int index_load(Index *index) {
 // ─── SORT ─────────────────────────────────────────────────
 
 static int cmp(const void *a, const void *b) {
-    return strcmp(((IndexEntry *)a)->path,
-                  ((IndexEntry *)b)->path);
+    return strcmp(((const IndexEntry *)a)->path,
+                  ((const IndexEntry *)b)->path);
 }
 
-// ─── SAVE INDEX ───────────────────────────────────────────
+// ─── SAVE INDEX (ATOMIC) ──────────────────────────────────
 
 int index_save(const Index *index) {
 
@@ -102,7 +109,7 @@ IndexEntry* index_find(Index *index, const char *path) {
     return NULL;
 }
 
-// ─── ADD FILE ─────────────────────────────────────────────
+// ─── ADD FILE (FIXED SAFE VERSION) ─────────────────────────
 
 int index_add(Index *index, const char *path) {
 
@@ -114,8 +121,18 @@ int index_add(Index *index, const char *path) {
     if (!f) return -1;
 
     void *buf = malloc(st.st_size);
-    fread(buf, 1, st.st_size, f);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
+    size_t n = fread(buf, 1, st.st_size, f);
     fclose(f);
+
+    if (n != st.st_size) {
+        free(buf);
+        return -1;
+    }
 
     ObjectID id;
     if (object_write(OBJ_BLOB, buf, st.st_size, &id) != 0) {
@@ -125,13 +142,19 @@ int index_add(Index *index, const char *path) {
 
     free(buf);
 
+    // find existing
     IndexEntry *e = index_find(index, path);
 
     if (!e) {
+        if (index->count >= MAX_INDEX_ENTRIES)
+            return -1;
+
         e = &index->entries[index->count++];
     }
 
-    strcpy(e->path, path);
+    strncpy(e->path, path, sizeof(e->path) - 1);
+    e->path[sizeof(e->path) - 1] = '\0';
+
     e->mode = st.st_mode;
     e->mtime_sec = st.st_mtime;
     e->size = st.st_size;
@@ -159,7 +182,7 @@ int index_remove(Index *index, const char *path) {
     return -1;
 }
 
-// ─── STATUS ───────────────────────────────────────────────
+// ─── STATUS (BASIC VERSION) ───────────────────────────────
 
 int index_status(const Index *index) {
 
