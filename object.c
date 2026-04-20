@@ -292,3 +292,11 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
         free(buf);
         return -1;
     }
+    // Extract data
+    *data_out = malloc(*len_out);
+    memcpy(*data_out, nul + 1, *len_out);
+
+    free(buf);
+    return 0;
+}
+
