@@ -194,7 +194,101 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
-}
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+
+    unsigned char *buf = malloc(size);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
+    fread(buf, 1, size, f);
+    fclose(f);
+
+    // Verify hash
+    ObjectID check;
+    compute_hash(buf, size, &check);
+
+    if (memcmp(check.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf);
+        return -1;
+    }
+
+    // Find header end
+    char *nul = memchr(buf, '\0', size);
+    if (!nul) {
+        free(buf);
+        return -1;
+    }
+
+    // Parse type and size
+    char type_str[16];
+    sscanf((char *)buf, "%s %zu", type_str, len_out);
+
+    if (strcmp(type_str, "blob") == 0)
+        *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0)
+        *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0)
+        *type_out = OBJ_COMMIT;
+    else {
+        free(buf);
+        return -1;
+    }int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+
+    unsigned char *buf = malloc(size);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
+    fread(buf, 1, size, f);
+    fclose(f);
+
+    // Verify hash
+    ObjectID check;
+    compute_hash(buf, size, &check);
+
+    if (memcmp(check.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf);
+        return -1;
+    }
+
+    // Find header end
+    char *nul = memchr(buf, '\0', size);
+    if (!nul) {
+        free(buf);
+        return -1;
+    }
+
+    // Parse type and size
+    char type_str[16];
+    sscanf((char *)buf, "%s %zu", type_str, len_out);
+
+    if (strcmp(type_str, "blob") == 0)
+        *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0)
+        *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0)
+        *type_out = OBJ_COMMIT;
+    else {
+        free(buf);
+        return -1;
+    }
