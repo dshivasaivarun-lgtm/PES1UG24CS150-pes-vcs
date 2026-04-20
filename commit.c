@@ -1,271 +1,205 @@
-// index.c — Staging area implementation
-//
-// Text format of .pes/index (one entry per line, sorted by path):
-//   <mode-octal> <64-char-hex-hash> <mtime-seconds> <size> <path>
+// commit.c — Commit creation and history traversal
 
+#include "commit.h"
 #include "index.h"
+#include "tree.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <inttypes.h>
+#include <time.h>
 #include <unistd.h>
-#include <dirent.h>
+#include <fcntl.h>
 
-// Forward declaration from object.c
+// Forward declarations (implemented in object.c)
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out);
 
-// ─── PROVIDED ────────────────────────────────────────────────────────────────
+// ─── PROVIDED ─────────────────────────────────────────────────────
 
-IndexEntry* index_find(Index *index, const char *path) {
-    for (int i = 0; i < index->count; i++) {
-        if (strcmp(index->entries[i].path, path) == 0)
-            return &index->entries[i];
-    }
-    return NULL;
-}
+// Parse raw commit data into a Commit struct.
+int commit_parse(const void *data, size_t len, Commit *commit_out) {
+    (void)len;
 
-int index_remove(Index *index, const char *path) {
-    for (int i = 0; i < index->count; i++) {
-        if (strcmp(index->entries[i].path, path) == 0) {
-            int remaining = index->count - i - 1;
-            if (remaining > 0)
-                memmove(&index->entries[i], &index->entries[i + 1],
-                        remaining * sizeof(IndexEntry));
-            index->count--;
-            return index_save(index);
-        }
-    }
-    fprintf(stderr, "error: '%s' is not in the index\n", path);
-    return -1;
-}
+    memset(commit_out, 0, sizeof(*commit_out));
 
-int index_status(const Index *index) {
-    printf("Staged changes:\n");
-    int staged_count = 0;
-    for (int i = 0; i < index->count; i++) {
-        printf("  staged:     %s\n", index->entries[i].path);
-        staged_count++;
-    }
-    if (staged_count == 0) printf("  (nothing to show)\n");
-    printf("\n");
+    char *copy = malloc(len + 1);
+    if (!copy) return -1;
 
-    printf("Unstaged changes:\n");
-    int unstaged_count = 0;
-    for (int i = 0; i < index->count; i++) {
-        struct stat st;
-        if (stat(index->entries[i].path, &st) != 0) {
-            printf("  deleted:    %s\n", index->entries[i].path);
-            unstaged_count++;
-        } else {
-            if (st.st_mtime != (time_t)index->entries[i].mtime_sec ||
-                st.st_size  != (off_t)index->entries[i].size) {
-                printf("  modified:   %s\n", index->entries[i].path);
-                unstaged_count++;
+    memcpy(copy, data, len);
+    copy[len] = '\0';
+
+    char *saveptr;
+    char *line = strtok_r(copy, "\n", &saveptr);
+
+    while (line) {
+        if (strncmp(line, "tree ", 5) == 0) {
+            hex_to_hash(line + 5, &commit_out->tree);
+        } else if (strncmp(line, "parent ", 7) == 0) {
+            hex_to_hash(line + 7, &commit_out->parent);
+            commit_out->has_parent = 1;
+        } else if (strncmp(line, "author ", 7) == 0) {
+            char *last_space = strrchr(line + 7, ' ');
+            if (last_space) {
+                *last_space = '\0';
+                strncpy(commit_out->author, line + 7, sizeof(commit_out->author) - 1);
+                commit_out->timestamp = strtoull(last_space + 1, NULL, 10);
             }
+        } else if (line[0] == '\0') {
+            char *msg = saveptr ? saveptr : "";
+            strncpy(commit_out->message, msg, sizeof(commit_out->message) - 1);
+            break;
         }
+
+        line = strtok_r(NULL, "\n", &saveptr);
     }
-    if (unstaged_count == 0) printf("  (nothing to show)\n");
-    printf("\n");
 
-    printf("Untracked files:\n");
-    int untracked_count = 0;
-    DIR *dir = opendir(".");
-    if (dir) {
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
-            if (strcmp(ent->d_name, ".pes") == 0) continue;
-            if (strcmp(ent->d_name, "pes") == 0) continue;
-            if (strstr(ent->d_name, ".o") != NULL) continue;
-
-            int is_tracked = 0;
-            for (int i = 0; i < index->count; i++) {
-                if (strcmp(index->entries[i].path, ent->d_name) == 0) {
-                    is_tracked = 1;
-                    break;
-                }
-            }
-            if (!is_tracked) {
-                struct stat st;
-                stat(ent->d_name, &st);
-                if (S_ISREG(st.st_mode)) {
-                    printf("  untracked:  %s\n", ent->d_name);
-                    untracked_count++;
-                }
-            }
-        }
-        closedir(dir);
-    }
-    if (untracked_count == 0) printf("  (nothing to show)\n");
-    printf("\n");
-
+    free(copy);
     return 0;
 }
 
-// ─── IMPLEMENTATION ──────────────────────────────────────────────────────────
+// Serialize Commit into text format.
+int commit_serialize(const Commit *commit, void **data_out, size_t *len_out) {
+    char tree_hex[HASH_HEX_SIZE + 1];
+    char parent_hex[HASH_HEX_SIZE + 1];
 
-// Load the index from INDEX_FILE (.pes/index).
-// If the file doesn't exist, initialize an empty index (not an error).
-// Format per line: <mode-octal> <64-hex-hash> <mtime> <size> <path>
-int index_load(Index *index) {
-    index->count = 0;
+    hash_to_hex(&commit->tree, tree_hex);
+    hash_to_hex(&commit->parent, parent_hex);
 
-    FILE *f = fopen(INDEX_FILE, "r");
-    if (!f) {
-        // No index file yet = empty staging area, that's fine
-        return 0;
+    size_t cap = 8192;
+    char *buf = malloc(cap);
+    if (!buf) return -1;
+
+    int n = 0;
+
+    n += snprintf(buf + n, cap - n, "tree %s\n", tree_hex);
+
+    if (commit->has_parent) {
+        n += snprintf(buf + n, cap - n, "parent %s\n", parent_hex);
     }
 
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        // Strip trailing newline
-        line[strcspn(line, "\r\n")] = '\0';
-        if (line[0] == '\0') continue;  // skip blank lines
+    n += snprintf(buf + n, cap - n, "author %s %" PRIu64 "\n",
+                  commit->author, commit->timestamp);
 
-        if (index->count >= MAX_INDEX_ENTRIES) {
-            fclose(f);
-            return -1;
-        }
+    n += snprintf(buf + n, cap - n, "\n%s\n", commit->message);
 
-        IndexEntry *e = &index->entries[index->count];
-
-        char hex[HASH_HEX_SIZE + 2];
-        unsigned int mode;
-        unsigned long long mtime;
-        unsigned int size;
-        char path[512];
-
-        // Parse: <mode> <hex> <mtime> <size> <path>
-        if (sscanf(line, "%o %64s %llu %u %511s",
-                   &mode, hex, &mtime, &size, path) != 5) {
-            fclose(f);
-            return -1;
-        }
-
-        e->mode      = (uint32_t)mode;
-        e->mtime_sec = (uint64_t)mtime;
-        e->size      = (uint32_t)size;
-        strncpy(e->path, path, sizeof(e->path) - 1);
-        e->path[sizeof(e->path) - 1] = '\0';
-
-        if (hex_to_hash(hex, &e->hash) != 0) {
-            fclose(f);
-            return -1;
-        }
-
-        index->count++;
-    }
-
-    fclose(f);
+    *data_out = buf;
+    *len_out = (size_t)n;
     return 0;
 }
 
-// Comparator for qsort — sort index entries by path alphabetically
-static int compare_entries_by_path(const void *a, const void *b) {
-    return strcmp(((const IndexEntry *)a)->path, ((const IndexEntry *)b)->path);
-}
-
-// Save the index to INDEX_FILE atomically (temp file + rename).
-// Sort entries by path before writing.
-int index_save(const Index *index) {
-    // Write to a temp file first
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", INDEX_FILE);
-
-    FILE *f = fopen(tmp, "w");
-    if (!f) return -1;
-
-    // Sort a heap-allocated copy of the entries (Index is too large for the stack)
-    IndexEntry *sorted = malloc((size_t)index->count * sizeof(IndexEntry));
-    if (!sorted) { fclose(f); return -1; }
-    memcpy(sorted, index->entries, (size_t)index->count * sizeof(IndexEntry));
-    qsort(sorted, (size_t)index->count, sizeof(IndexEntry), compare_entries_by_path);
+// Read current HEAD commit hash.
+int head_read(ObjectID *id_out) {
+    FILE *fp = fopen(".pes/refs/heads/main", "r");
+    if (!fp) return -1;
 
     char hex[HASH_HEX_SIZE + 1];
-    for (int i = 0; i < index->count; i++) {
-        const IndexEntry *e = &sorted[i];
-        hash_to_hex(&e->hash, hex);
-        fprintf(f, "%o %s %llu %u %s\n",
-                e->mode, hex,
-                (unsigned long long)e->mtime_sec,
-                e->size,
-                e->path);
-    }
-    free(sorted);
-
-    // Flush userspace buffers, sync to disk, then rename atomically
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
-
-    if (rename(tmp, INDEX_FILE) != 0) {
-        unlink(tmp);
+    if (!fgets(hex, sizeof(hex), fp)) {
+        fclose(fp);
         return -1;
     }
+
+    fclose(fp);
+
+    hex[strcspn(hex, "\r\n")] = '\0';
+    return hex_to_hash(hex, id_out);
+}
+
+// Update HEAD branch pointer.
+int head_update(const ObjectID *id) {
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id, hex);
+
+    FILE *fp = fopen(".pes/refs/heads/main", "w");
+    if (!fp) return -1;
+
+    fprintf(fp, "%s\n", hex);
+    fclose(fp);
     return 0;
 }
 
-// Stage a file: read contents → write blob → update index entry.
-int index_add(Index *index, const char *path) {
-    // Read the file contents
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "error: cannot open '%s'\n", path);
+// Walk commit history from HEAD backward.
+int commit_walk(commit_walk_fn callback) {
+    ObjectID current;
+
+    if (head_read(&current) != 0)
         return -1;
-    }
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    rewind(f);
-    if (file_size < 0) { fclose(f); return -1; }
 
-    unsigned char *contents = malloc((size_t)file_size + 1);
-    if (!contents) { fclose(f); return -1; }
+    while (1) {
+        ObjectType type;
+        void *data = NULL;
+        size_t len = 0;
 
-    size_t nread = fread(contents, 1, (size_t)file_size, f);
-    fclose(f);
-    if (nread != (size_t)file_size) { free(contents); return -1; }
+        if (object_read(&current, &type, &data, &len) != 0)
+            return -1;
 
-    // Write as a blob object
-    ObjectID blob_id;
-    if (object_write(OBJ_BLOB, contents, (size_t)file_size, &blob_id) != 0) {
-        free(contents);
-        return -1;
-    }
-    free(contents);
-
-    // Get file metadata
-    struct stat st;
-    if (lstat(path, &st) != 0) return -1;
-
-    uint32_t mode;
-    if (S_ISDIR(st.st_mode))       mode = 0040000;
-    else if (st.st_mode & S_IXUSR) mode = 0100755;
-    else                            mode = 0100644;
-
-    // Update or insert the index entry
-    IndexEntry *existing = index_find(index, path);
-    if (existing) {
-        // Update in place
-        existing->mode      = mode;
-        existing->hash      = blob_id;
-        existing->mtime_sec = (uint64_t)st.st_mtime;
-        existing->size      = (uint32_t)st.st_size;
-    } else {
-        // Add new entry
-        if (index->count >= MAX_INDEX_ENTRIES) {
-            fprintf(stderr, "error: index full\n");
+        if (type != OBJ_COMMIT) {
+            free(data);
             return -1;
         }
-        IndexEntry *e = &index->entries[index->count++];
-        e->mode      = mode;
-        e->hash      = blob_id;
-        e->mtime_sec = (uint64_t)st.st_mtime;
-        e->size      = (uint32_t)st.st_size;
-        strncpy(e->path, path, sizeof(e->path) - 1);
-        e->path[sizeof(e->path) - 1] = '\0';
+
+        Commit c;
+        commit_parse(data, len, &c);
+        free(data);
+
+        callback(&current, &c);
+
+        if (!c.has_parent)
+            break;
+
+        current = c.parent;
     }
 
-    // Persist the updated index atomically
-    return index_save(index);
+    return 0;
+}
+
+// ─── TODO IMPLEMENTATION ──────────────────────────────────────────
+
+// Create a commit from current staged state.
+int commit_create(const char *message, ObjectID *commit_id_out) {
+    ObjectID tree_id;
+
+    // Build snapshot tree
+    if (tree_from_index(&tree_id) != 0)
+        return -1;
+
+    Commit commit;
+    memset(&commit, 0, sizeof(commit));
+
+    commit.tree = tree_id;
+
+    // Read parent commit if exists
+    ObjectID parent_id;
+    if (head_read(&parent_id) == 0) {
+        commit.has_parent = 1;
+        commit.parent = parent_id;
+    } else {
+        commit.has_parent = 0;
+    }
+
+    // Metadata
+    strncpy(commit.author, pes_author(), sizeof(commit.author) - 1);
+    commit.timestamp = (uint64_t)time(NULL);
+    strncpy(commit.message, message, sizeof(commit.message) - 1);
+
+    // Serialize commit
+    void *data = NULL;
+    size_t len = 0;
+
+    if (commit_serialize(&commit, &data, &len) != 0)
+        return -1;
+
+    // Store commit object
+    if (object_write(OBJ_COMMIT, data, len, commit_id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
+
+    // Update HEAD
+    if (head_update(commit_id_out) != 0)
+        return -1;
+
+    return 0;
 }
