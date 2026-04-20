@@ -113,6 +113,36 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     memcpy(buf, header, header_len);
     memcpy(buf + header_len, data, len);
 
+     // Compute hash
+    ObjectID id;
+    compute_hash(buf, total, &id);
+
+    if (id_out) *id_out = id;
+
+    // Deduplication
+    if (object_exists(&id)) {
+        free(buf);
+        return 0;
+    }
+
+    // Build path
+    char path[512];
+    object_path(&id, path, sizeof(path));
+
+    // Extract directory
+    char dir[512];
+    strncpy(dir, path, sizeof(dir));
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        free(buf);
+        return -1;
+    }
+    *slash = '\0';
+
+    mkdir(".pes", 0755);
+    mkdir(OBJECTS_DIR, 0755);
+    mkdir(dir, 0755);
+    
     return -1;
 }
 
