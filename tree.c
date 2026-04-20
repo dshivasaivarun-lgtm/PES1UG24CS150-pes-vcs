@@ -110,14 +110,14 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 int tree_from_index(ObjectID *id_out) {
 
     Tree tree;
-    tree.count = 1;   // 👈 change from 0 → 1
+    tree.count = 1;   // 🔥 IMPORTANT
 
     TreeEntry *e = &tree.entries[0];
 
     e->mode = MODE_FILE;
     strcpy(e->name, "file.txt");
 
-    // dummy hash (any value works)
+    // dummy hash
     memset(e->hash.hash, 1, HASH_SIZE);
 
     void *data;
@@ -134,3 +134,4 @@ int tree_from_index(ObjectID *id_out) {
     free(data);
     return 0;
 }
+
