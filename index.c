@@ -16,7 +16,6 @@ int index_load(Index *index) {
 
     FILE *f = fopen(INDEX_FILE, "r");
 
-    // If file doesn't exist → empty index
     if (!f) {
         index->count = 0;
         return 0;
@@ -55,11 +54,10 @@ static int cmp(const void *a, const void *b) {
                   ((IndexEntry *)b)->path);
 }
 
-// ─── SAVE INDEX (ATOMIC WRITE) ─────────────────────────────
+// ─── SAVE INDEX ───────────────────────────────────────────
 
 int index_save(const Index *index) {
 
-    // Copy to sort
     Index temp = *index;
     qsort(temp.entries, temp.count, sizeof(IndexEntry), cmp);
 
@@ -93,7 +91,18 @@ int index_save(const Index *index) {
     return 0;
 }
 
-// ─── ADD FILE ──────────────────────────────────────────────
+// ─── FIND ENTRY ───────────────────────────────────────────
+
+IndexEntry* index_find(Index *index, const char *path) {
+    for (int i = 0; i < index->count; i++) {
+        if (strcmp(index->entries[i].path, path) == 0) {
+            return &index->entries[i];
+        }
+    }
+    return NULL;
+}
+
+// ─── ADD FILE ─────────────────────────────────────────────
 
 int index_add(Index *index, const char *path) {
 
@@ -116,7 +125,6 @@ int index_add(Index *index, const char *path) {
 
     free(buf);
 
-    // Check existing entry
     IndexEntry *e = index_find(index, path);
 
     if (!e) {
@@ -130,4 +138,46 @@ int index_add(Index *index, const char *path) {
     e->hash = id;
 
     return index_save(index);
+}
+
+// ─── REMOVE FILE ──────────────────────────────────────────
+
+int index_remove(Index *index, const char *path) {
+
+    for (int i = 0; i < index->count; i++) {
+        if (strcmp(index->entries[i].path, path) == 0) {
+
+            for (int j = i; j < index->count - 1; j++) {
+                index->entries[j] = index->entries[j + 1];
+            }
+
+            index->count--;
+            return index_save(index);
+        }
+    }
+
+    return -1;
+}
+
+// ─── STATUS ───────────────────────────────────────────────
+
+int index_status(const Index *index) {
+
+    printf("Staged changes:\n");
+
+    if (index->count == 0) {
+        printf("  (nothing to show)\n");
+    } else {
+        for (int i = 0; i < index->count; i++) {
+            printf("  staged:     %s\n", index->entries[i].path);
+        }
+    }
+
+    printf("\nUnstaged changes:\n");
+    printf("  (nothing to show)\n");
+
+    printf("\nUntracked files:\n");
+    printf("  (nothing to show)\n");
+
+    return 0;
 }
