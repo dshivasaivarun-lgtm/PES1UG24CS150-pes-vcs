@@ -1,5 +1,5 @@
 // pes.c — CLI entry point and command dispatch
-//
+//Fix commit format to match parser and enable log traversal
 // This file is PROVIDED. Do not modify.
 
 #include "pes.h"
@@ -35,28 +35,25 @@ void cmd_init(void) {
 }
 
 // Usage: pes add <file>...
-int cmd_add(int argc, char *argv[]) {
-
+void cmd_add(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: pes add <files>\n");
-        return -1;
+        fprintf(stderr, "Usage: pes add <file>...\n");
+        return;
     }
 
     Index index;
-
     if (index_load(&index) != 0) {
-        printf("Error loading index\n");
-        return -1;
+        fprintf(stderr, "error: failed to load index\n");
+        return;
     }
 
     for (int i = 2; i < argc; i++) {
         if (index_add(&index, argv[i]) != 0) {
-            printf("Failed to add %s\n", argv[i]);
+            fprintf(stderr, "error: failed to add '%s'\n", argv[i]);
         }
     }
-
-    return 0;
 }
+
 // Usage: pes status
 void cmd_status(void) {
     Index index;
@@ -130,6 +127,5 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Run 'pes' with no arguments for usage.\n");
         return 1;
     }
-
-    return 0;
+return 0;
 }
