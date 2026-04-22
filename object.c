@@ -1,5 +1,5 @@
 // object.c — Content-addressable object store
-
+//Extend CLI to support show and ls-tree commands
 #include "pes.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +10,7 @@
 #include <openssl/evp.h>
 
 // ─── PROVIDED ─────────────────────────────────────────────
-
+//phase 1:ogject_write implemented
 void hash_to_hex(const ObjectID *id, char *hex_out) {
     for (int i = 0; i < HASH_SIZE; i++) {
         sprintf(hex_out + i * 2, "%02x", id->hash[i]);
@@ -51,71 +51,84 @@ int object_exists(const ObjectID *id) {
 
 // ─── IMPLEMENTATION ───────────────────────────────────────
 
+// WRITE OBJECT
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
     const char *type_str =
-        (type == OBJ_BLOB)   ? "blob"   :
-        (type == OBJ_TREE)   ? "tree"   :
+        (type == OBJ_BLOB) ? "blob" :
+        (type == OBJ_TREE) ? "tree" :
         (type == OBJ_COMMIT) ? "commit" : NULL;
+
     if (!type_str) return -1;
 
-    // Build header: "<type> <size>\0"
+    // Build header
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
-
-    // Allocate full buffer = header + data
-    size_t total = (size_t)header_len + len;
+    //// Step 2: Allocate buffer for header + data
+    size_t total = header_len + len;
     unsigned char *buf = malloc(total);
     if (!buf) return -1;
+    //// Step 3: Copy header and data into buffer
     memcpy(buf, header, header_len);
     memcpy(buf + header_len, data, len);
 
-    // Compute SHA-256 of entire buffer
+    // Step 4: Compute SHA-256 hash of full object (header + data)
     ObjectID id;
     compute_hash(buf, total, &id);
+
     if (id_out) *id_out = id;
 
-    // Deduplication: skip if already stored
-    if (object_exists(&id)) { free(buf); return 0; }
+    // // Step 5: Check if object already exists to avoid duplicate storage
+    if (object_exists(&id)) {
+        free(buf);
+        return 0;
+    }
 
-    // Build shard path: .pes/objects/XX/YYY...
+    // Build path
     char path[512];
     object_path(&id, path, sizeof(path));
 
-    // Extract directory portion
+    // Extract directory
     char dir[512];
-    strncpy(dir, path, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
+    strncpy(dir, path, sizeof(dir));
     char *slash = strrchr(dir, '/');
-    if (!slash) { free(buf); return -1; }
+    if (!slash) {
+        free(buf);
+        return -1;
+    }
     *slash = '\0';
 
-    // Create directories
     mkdir(".pes", 0755);
     mkdir(OBJECTS_DIR, 0755);
     mkdir(dir, 0755);
 
-    // Atomic write: write to tmp, fsync, rename
-    char tmp[520];
+    // Temp file
+    char tmp[512];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 
-    int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0444);
-    if (fd < 0) { free(buf); return -1; }
+    int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(buf);
+        return -1;
+    }
 
-    ssize_t written = write(fd, buf, total);
+    write(fd, buf, total);
     fsync(fd);
     close(fd);
-    free(buf);
 
-    if (written < 0 || (size_t)written != total) { unlink(tmp); return -1; }
-    if (rename(tmp, path) != 0) { unlink(tmp); return -1; }
+    rename(tmp, path);
 
-    // fsync shard directory
+    // fsync directory
     int dfd = open(dir, O_RDONLY);
-    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
 
+    free(buf);
     return 0;
 }
 
+// READ OBJECT
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
     char path[512];
     object_path(id, path, sizeof(path));
@@ -124,47 +137,52 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
     if (!f) return -1;
 
     fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
+    long size = ftell(f);
     rewind(f);
-    if (file_size <= 0) { fclose(f); return -1; }
 
-    unsigned char *buf = malloc((size_t)file_size);
-    if (!buf) { fclose(f); return -1; }
-
-    if (fread(buf, 1, (size_t)file_size, f) != (size_t)file_size) {
-        fclose(f); free(buf); return -1;
+    unsigned char *buf = malloc(size);
+    if (!buf) {
+        fclose(f);
+        return -1;
     }
+
+    fread(buf, 1, size, f);
     fclose(f);
 
-    // Integrity check: re-hash and compare
+    // Verify hash
     ObjectID check;
-    compute_hash(buf, (size_t)file_size, &check);
-    if (memcmp(check.hash, id->hash, HASH_SIZE) != 0) { free(buf); return -1; }
+    compute_hash(buf, size, &check);
 
-    // Find the '\0' separating header from data
-    unsigned char *nul = memchr(buf, '\0', (size_t)file_size);
-    if (!nul) { free(buf); return -1; }
+    if (memcmp(check.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf);
+        return -1;
+    }
 
-    // Parse type and size from header
+    // Find header end
+    char *nul = memchr(buf, '\0', size);
+    if (!nul) {
+        free(buf);
+        return -1;
+    }
+
+    // Parse type and size
     char type_str[16];
-    size_t data_len = 0;
-    if (sscanf((char *)buf, "%15s %zu", type_str, &data_len) != 2) { free(buf); return -1; }
+    sscanf((char *)buf, "%s %zu", type_str, len_out);
 
-    if      (strcmp(type_str, "blob")   == 0) *type_out = OBJ_BLOB;
-    else if (strcmp(type_str, "tree")   == 0) *type_out = OBJ_TREE;
-    else if (strcmp(type_str, "commit") == 0) *type_out = OBJ_COMMIT;
-    else { free(buf); return -1; }
+    if (strcmp(type_str, "blob") == 0)
+        *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0)
+        *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0)
+        *type_out = OBJ_COMMIT;
+    else {
+        free(buf);
+        return -1;
+    }
 
-    // Copy data portion (after the '\0')
-    unsigned char *data_start = nul + 1;
-    size_t available = (size_t)file_size - (size_t)(data_start - buf);
-    if (data_len > available) { free(buf); return -1; }
-
-    *data_out = malloc(data_len + 1);
-    if (!*data_out) { free(buf); return -1; }
-    memcpy(*data_out, data_start, data_len);
-    ((char *)*data_out)[data_len] = '\0';
-    *len_out = data_len;
+    // Extract data
+    *data_out = malloc(*len_out);
+    memcpy(*data_out, nul + 1, *len_out);
 
     free(buf);
     return 0;
